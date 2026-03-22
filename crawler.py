@@ -1,153 +1,117 @@
 import sqlite3
-import random
 import time
-import numpy as np
-from datetime import datetime, timedelta
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
 import config
-
 
 class StrongMemorySpider:
     def __init__(self):
         self.db_name = "memory_market.db"
         self._init_db()
+        # 伪装成真实浏览器，降低被拦截概率
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
 
     def _init_db(self):
-        """初始化数据库：确保价格表和日志表都存在"""
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
-        # 1. 价格历史表
-        c.execute('''CREATE TABLE IF NOT EXISTS price_history
-                     (
-                         brand
-                         TEXT,
-                         spec
-                         TEXT,
-                         platform
-                         TEXT,
-                         date
-                         TEXT,
-                         price
-                         REAL,
-                         url
-                         TEXT
-                     )''')
-        # 2. 爬虫日志表
-        c.execute('''CREATE TABLE IF NOT EXISTS crawler_logs
-                     (
-                         id
-                         INTEGER
-                         PRIMARY
-                         KEY
-                         AUTOINCREMENT,
-                         timestamp
-                         DATETIME
-                         DEFAULT
-                         CURRENT_TIMESTAMP,
-                         status
-                         TEXT,
-                         items_count
-                         INTEGER,
-                         error_msg
-                         TEXT
-                     )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS price_history 
+                     (brand TEXT, spec TEXT, platform TEXT, date TEXT, price REAL, url TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS crawler_logs 
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, 
+                      status TEXT, items_count INTEGER, error_msg TEXT)''')
         conn.commit()
         conn.close()
 
     def write_log(self, status, count=0, error=""):
-        """向数据库写入运行日记"""
         try:
             conn = sqlite3.connect(self.db_name)
             c = conn.cursor()
-            c.execute("INSERT INTO crawler_logs (status, items_count, error_msg) VALUES (?, ?, ?)",
+            c.execute("INSERT INTO crawler_logs (status, items_count, error_msg) VALUES (?, ?, ?)", 
                       (status, count, error))
             conn.commit()
             conn.close()
-        except Exception as e:
-            print(f"✍️ 写入日志失败: {e}")
+        except: pass
 
-    def generate_url(self, b, s, p):
-        """生成查证链接"""
-        kw = f"{b}+{s}".replace(" ", "+")
-        return f"https://search.jd.com/Search?keyword={kw}" if p == "京东" else f"https://s.taobao.com/search?q={kw}"
+    def get_real_market_price(self, brand, spec, platform):
+        """真实抓取逻辑：目前以京东为例示范"""
+        keyword = f"{brand} {spec} 内存条".replace(" ", "+")
+        url = f"https://search.jd.com/Search?keyword={keyword}&enc=utf-8"
+        
+        # 淘宝反爬极严，暂时统一走京东接口或综合报价网演示
+        try:
+            res = requests.get(url, headers=self.headers, timeout=10)
+            res.encoding = 'utf-8'
+            soup = BeautifulSoup(res.text, 'html.parser')
+            
+            # 定位京东的价格标签 <div class="p-price"><i>xxx</i></div>
+            price_tags = soup.select('.p-price i')
+            if not price_tags:
+                return None, url
+                
+            # 清洗数据并取中位数（过滤掉异常的超低价运费或天价商品）
+            prices = []
+            for tag in price_tags:
+                txt = tag.text.strip()
+                if txt.replace('.', '', 1).isdigit():
+                    prices.append(float(txt))
+            
+            if prices:
+                prices.sort()
+                median_price = prices[len(prices)//2]
+                return median_price, url
+                
+        except Exception as e:
+            print(f"抓取 {brand} {spec} 时出错: {e}")
+        return None, url
 
     def run_sync(self):
-        """
-        🚀 核心引擎：
-        1. 清理旧数据
-        2. 采用正弦波算法生成 60 天高仿真历史数据
-        3. 批量写入数据库 (速度提升 100 倍)
-        """
-        print("🕷️ 启动高并发模拟爬虫引擎...")
-        start_time = time.time()
-
+        print("🕷️ 启动全网真实抓取引擎...")
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
-
-        # 清理旧数据，确保 AI 预测获得最新生成的趋势
-        c.execute("DELETE FROM price_history")
-
-        days = 60
-        today = datetime.now()
-        bulk_data = []  # 数据缓冲池
+        
+        today_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        total_count = 0
         display_logs = []
 
         try:
-            # 获取配置
             brands = list(config.BRAND_WEIGHTS.keys())
             specs = list(config.BASE_PRICES.keys())
-            platforms = config.PLATFORMS
-
+            
             for brand in brands:
-                weight = config.BRAND_WEIGHTS.get(brand, 1.0)
                 for spec in specs:
-                    base_price = config.BASE_PRICES[spec]
-                    for platform in platforms:
-                        # 模拟该品牌在该平台的基准价
-                        current_target = base_price * weight
+                    # 真实网络请求需要节制，每次请求休眠 2 秒防止被封 IP
+                    time.sleep(2) 
+                    
+                    price, url = self.get_real_market_price(brand, spec, "京东")
+                    
+                    if price:
+                        # 插入真实数据（不再清空旧数据，而是追加每天的新数据）
+                        c.execute("INSERT INTO price_history VALUES (?,?,?,?,?,?)", 
+                                 (brand, spec, "京东", today_str, price, url))
+                        total_count += 1
+                        print(f"✅ 获取成功: {brand} {spec} -> ¥{price}")
+                    else:
+                        print(f"⚠️ 获取失败: {brand} {spec}")
+                        
+                display_logs.append(f"✅ {brand} 当日真实数据更新完毕")
 
-                        # 生成 60 天历史点
-                        for i in range(days):
-                            # 计算日期
-                            date_obj = today - timedelta(days=days - i)
-                            date_str = date_obj.strftime("%Y-%m-%d %H:%M:%S")
-
-                            # --- 📈 核心趋势算法 (来自你的 spider.py) ---
-                            # 正弦波模拟周期波动 + 随机噪音
-                            trend = np.sin((days - i) / 5) * 0.02
-                            noise = (random.random() - 0.5) * 0.05
-                            final_price = round(current_target * (1 + trend) * (1 + noise), 2)
-
-                            url = self.generate_url(brand, spec, platform)
-
-                            # 放入缓冲池
-                            bulk_data.append((brand, spec, platform, date_str, final_price, url))
-
-                display_logs.append(f"✅ {brand} 矩阵计算完成")
-
-            # --- 📦 批量写入 (效率极高) ---
-            c.executemany("INSERT INTO price_history VALUES (?,?,?,?,?,?)", bulk_data)
             conn.commit()
-
-            cost = time.time() - start_time
-            total_count = len(bulk_data)
-
-            # 记录成功日志
             self.write_log("Success", count=total_count)
-            print(f"✅ 成功录入 {total_count} 条实盘记录！耗时: {cost:.2f} 秒")
-
+            print(f"🎉 今日真实行情抓取完毕，共 {total_count} 条。")
+            
         except Exception as e:
             self.write_log("Failed", error=str(e))
-            print(f"❌ 同步失败: {str(e)}")
-
         finally:
             conn.close()
-
+            
         return display_logs
 
-
-# 🌟 关键：全局实例化，供 app.py 调用
 spider = StrongMemorySpider()
-
 if __name__ == "__main__":
-    # 如果直接运行此脚本，则执行同步
     spider.run_sync()
