@@ -4,17 +4,18 @@ import engine, config, crawler, dev_tools
 import plotly.graph_objects as go
 import pandas as pd
 import sqlite3
+from datetime import datetime
 
-# 初始化配置
-st.set_page_config(page_title="AI 内存决策终端", layout="wide")
+st.set_page_config(page_title="AI 内存决策终端", layout="wide", page_icon="📈")
 db.init_db()
-dev_tools.enable_admin_bypass()  # 🌟 开启默认管理员进入
+dev_tools.enable_admin_bypass() 
 device, d_name = engine.get_device()
 
-# UI 样式
+# 高级 UI 样式
 st.markdown("""
 <style>
-    .price-val { color: #00FF00; font-size: 28px; font-weight: bold; }
+    .metric-card { background-color: #1E1E1E; padding: 20px; border-radius: 10px; border-left: 5px solid #00FF00; box-shadow: 2px 2px 10px rgba(0,0,0,0.5); }
+    .price-val { color: #00FF00; font-size: 32px; font-weight: bold; margin: 0; }
     .status-success { color: #2ecc71; font-weight: bold; }
     .status-failed { color: #e74c3c; font-weight: bold; }
 </style>
@@ -25,112 +26,90 @@ if st.session_state.get('username'):
         st.title("🛡️ 决策终端")
         st.write(f"用户: {st.session_state['username']} ({st.session_state['role']})")
         dev_tools.show_debug_sidebar()
+        st.info("💡 提示：数据现已由 GitHub Actions 每天中午 12 点自动进行全网真实采集。")
 
-    t_data, t_admin = st.tabs(["📊 价格趋势 (RMB)", "⚙️ 系统管理"])
+    t_data, t_admin = st.tabs(["📊 实时大盘与预测", "⚙️ 系统管理日志"])
 
-    # --- 1. 价格趋势标签页 ---
     with t_data:
-        st.header("🎯 内存价格 AI 预测分析")
+        st.title("🎯 内存价格 AI 深度决策系统")
+        st.markdown("基于真实全网电商价格抓取 · 采用 PyTorch 神经网络预测趋势")
+        
         c1, c2, c3 = st.columns(3)
-        sb = c1.multiselect("品牌", list(config.BRAND_WEIGHTS.keys()), default=["海力士"])
-        ss = c2.selectbox("规格", list(config.BASE_PRICES.keys()))
-        sp = c3.selectbox("平台", config.PLATFORMS)
+        sb = c1.multiselect("选择监控品牌", list(config.BRAND_WEIGHTS.keys()), default=["海力士"])
+        ss = c2.selectbox("选择规格", list(config.BASE_PRICES.keys()))
+        sp = c3.selectbox("数据源平台", config.PLATFORMS)
 
-        if st.button("🤖 执行 AI 深度预测", type="primary", use_container_width=True):
+        st.divider()
+
+        if st.button("🤖 调取真实数据并执行 AI 预测", type="primary", use_container_width=True):
             fig = go.Figure()
             cols = st.columns(len(sb))
+            
             for i, b in enumerate(sb):
                 df_h = db.get_real_data(b, ss, sp)
+                
                 if not df_h.empty:
-                    # 获取 AI 预测
+                    # --- 核心 UI 优化：计算价格涨跌幅指标 ---
+                    current_price = df_h['Price'].iloc[-1]
+                    price_diff = 0
+                    if len(df_h) > 1:
+                        price_diff = current_price - df_h['Price'].iloc[-2]
+                    
+                    with cols[i]:
+                        st.markdown(f"### {b}")
+                        # 使用 Streamlit 原生 KPI 组件展示
+                        st.metric(label="当前现货全网中位价", value=f"¥ {current_price:.2f}", delta=f"{price_diff:.2f} (较前一日)")
+                        st.link_button(f"🔗 前往 {sp} 查证货源", df_h['URL'].iloc[-1], use_container_width=True)
+
+                    # --- 核心绘图优化：无缝连接历史与预测线 ---
                     df_p, acc = engine.predict_future_prices_pytorch(df_h, f"{b}_{ss}", device)
 
-                    # 绘制实测线
-                    fig.add_trace(go.Scatter(x=df_h['Date'], y=df_h['Price'], name=f"{b}-实测"))
+                    # 画历史实测线
+                    fig.add_trace(go.Scatter(x=df_h['Date'], y=df_h['Price'], name=f"{b}-历史实测", mode='lines+markers'))
 
-                    # 检查预测数据并绘线
                     if not df_p.empty and 'Date' in df_p.columns:
-                        fig.add_trace(
-                            go.Scatter(x=df_p['Date'], y=df_p['Pred'], name=f"{b}-预测", line=dict(dash='dot')))
+                        # 重点：把历史的最后一条数据，追加到预测数据的最前面，消除图表断层
+                        last_real_point = df_h.iloc[[-1]].copy()
+                        last_real_point = last_real_point.rename(columns={'Price': 'Pred'})
+                        df_p_connected = pd.concat([last_real_point, df_p])
+                        
+                        fig.add_trace(go.Scatter(
+                            x=df_p_connected['Date'], 
+                            y=df_p_connected['Pred'], 
+                            name=f"{b}-AI预测轨迹", 
+                            line=dict(dash='dot', width=3),
+                            mode='lines+markers'
+                        ))
                         with cols[i]:
-                            st.metric(label=f"📈 {b} 预测信心度", value=f"{acc:.1f}%")
-                    else:
-                        with cols[i]:
-                            st.warning(f"⚠️ {b} 历史数据不足，AI 暂无趋势线")
+                            st.caption(f"🤖 神经网络预测信心度: {acc:.1f}%")
 
-                    # 展示价格卡片
-                    st.markdown(f"{b} 最新价: <span class='price-val'>¥{df_h['Price'].iloc[-1]}</span>",
-                                unsafe_allow_html=True)
-                    st.link_button(f"🔗 查证 {sp} 原始网页", df_h['URL'].iloc[-1], use_container_width=True)
-
+            # 优化图表外观
+            fig.update_layout(hovermode="x unified", title="📈 历史走势与未来 7 天预测", template="plotly_dark")
             st.plotly_chart(fig, use_container_width=True)
 
-    # --- 2. 系统管理标签页 (管理员后台) ---
     with t_admin:
         if st.session_state['role'] == 'admin':
             st.header("⚙️ 终端管理控制台")
-
-            # 操作区
             col_ctrl, col_info = st.columns([1, 2])
             with col_ctrl:
-                st.subheader("🚀 数据同步")
-                if st.button("🕸️ 启动全网同步 (中位数算法)", use_container_width=True):
-                    with st.spinner("正在注入实时数据..."):
-                        logs = crawler.spider.run_sync()
-                        st.success("同步完成，品牌价格矩阵已更新。")
-                        st.rerun()  # 刷新页面以显示最新日志
+                st.subheader("🚀 手动强刷数据")
+                st.caption("提示：云端每天会自动抓取，非必要无需手动强刷。")
+                if st.button("🕸️ 强制唤醒爬虫抓取现价", use_container_width=True):
+                    with st.spinner("正在从电商平台实时拉取数据 (需时约数十秒)..."):
+                        crawler.spider.run_sync()
+                        st.success("最新真实行情拉取完毕！")
+                        st.rerun() 
 
-            # 日志监控区
-            st.divider()
-            st.subheader("🛡️ 爬虫运行日志 (最近 10 次)")
-
-            try:
-                conn = sqlite3.connect('memory_market.db')
-                # 读取最近10条日志
-                df_logs = pd.read_sql_query(
-                    "SELECT timestamp, status, items_count, error_msg FROM crawler_logs ORDER BY timestamp DESC LIMIT 10",
-                    conn)
-                conn.close()
-
-                if not df_logs.empty:
-                    # 格式化时间显示
-                    df_logs['timestamp'] = pd.to_datetime(df_logs['timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
-
-
-                    # 样式处理：成功绿，失败红
-                    def style_status(row):
-                        color = 'background-color: #2ecc7122; color: #2ecc71' if row[
-                                                                                     'status'] == 'Success' else 'background-color: #e74c3c22; color: #e74c3c'
-                        return [color] * len(row)
-
-
-                    st.dataframe(
-                        df_logs.style.apply(style_status, axis=1),
-                        column_config={
-                            "timestamp": "运行时间",
-                            "status": "状态",
-                            "items_count": "抓取数量",
-                            "error_msg": "错误详情"
-                        },
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-                    # 运行统计小组件
-                    success_count = len(df_logs[df_logs['status'] == 'Success'])
-                    st.caption(f"📊 当前运行统计：成功 {success_count} / 总计 {len(df_logs)}")
-                else:
-                    st.info("💡 尚无运行记录，请点击上方按钮启动第一次同步。")
-            except Exception as e:
-                st.error(f"无法读取日志表: {e}")
-
-        else:
-            st.error("🔒 权限不足：非管理员无法访问系统管理模块。")
-
-else:
-    # 登录拦截
-    st.warning("⚠️ 请先登录系统（或检查 dev_tools 设置以绕过登录）")
-    if st.button("尝试默认登录"):
-        st.session_state['username'] = "Admin_Tester"
-        st.session_state['role'] = "admin"
-        st.rerun()
+            with col_info:
+                st.subheader("🛡️ 云端爬虫运行日志")
+                try:
+                    conn = sqlite3.connect('memory_market.db')
+                    df_logs = pd.read_sql_query("SELECT timestamp, status, items_count, error_msg FROM crawler_logs ORDER BY timestamp DESC LIMIT 10", conn)
+                    conn.close()
+                    if not df_logs.empty:
+                        def style_status(row):
+                            color = 'background-color: #2ecc7122; color: #2ecc71' if row['status'] == 'Success' else 'background-color: #e74c3c22; color: #e74c3c'
+                            return [color] * len(row)
+                        st.dataframe(df_logs.style.apply(style_status, axis=1), use_container_width=True, hide_index=True)
+                except:
+                    st.error("日志读取失败")
