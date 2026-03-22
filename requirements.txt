@@ -1,6 +1,8 @@
 streamlit
+requests
+beautifulsoup4
 pandas
-plotly
-torch
-scikit-learn
 numpy
+plotly
+scikit-learn
+torch
